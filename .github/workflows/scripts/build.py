@@ -67,7 +67,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--op8e", action="store_true")
     parser.add_argument("--bbr", action="store_true")
     parser.add_argument("--no-release", action="store_true")
-    parser.add_argument("--version")
+    parser.add_argument("--custom-version", dest="custom_version")
     parser.add_argument("--revision")
     parser.add_argument("--matrix", "-m")
     parser.add_argument("--all", action="store_true")
@@ -96,7 +96,7 @@ def create_build_config(args: argparse.Namespace) -> BuildConfig:
         support_op8e=args.op8e,
         set_default_bbr=args.bbr,
         make_release=not args.no_release,
-        custom_version=args.version,
+        custom_version=args.custom_version,
         revision=args.revision,
     )
 
@@ -161,7 +161,7 @@ def build_matrix(matrix_key: str, args: argparse.Namespace, workspace: str) -> l
                 support_op8e=args.op8e,
                 set_default_bbr=args.bbr,
                 make_release=not args.no_release,
-                custom_version=args.version,
+                custom_version=args.custom_version,
                 revision=cfg_data.get("revision"),
             )
 

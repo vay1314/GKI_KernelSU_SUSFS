@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from config import (BuildConfig, KSU_REPO_CONFIG, SUSFS_REPO_CONFIG, SUKISU_PATCH_REPO_CONFIG,
                    ANYKERNEL_CONFIG, KERNEL_PATCHES_CONFIG, BBG_CONFIG, TOOLCHAIN_CONFIG,
                    LEGACY_FIXES, OP8E_PATCH_URL, KPM_PATCH_URL)
+import paths as P
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -40,21 +41,6 @@ class ShellCommand:
         except subprocess.TimeoutExpired:
             logger.error(f"命令执行超时: {cmd}")
             raise
-
-    def run_with_callback(self, cmd: str, callback: Optional[Callable] = None) -> str:
-        logger.info(f"执行命令: {cmd}")
-        process = subprocess.Popen(cmd, shell=True, cwd=self.cwd, env=self.env,
-                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-        output_lines = []
-        for line in process.stdout:
-            line = line.rstrip()
-            output_lines.append(line)
-            if callback:
-                callback(line)
-        process.wait()
-        if process.returncode != 0:
-            raise RuntimeError(f"命令执行失败")
-        return "\n".join(output_lines)
 
 
 class KernelBuilder:
@@ -100,19 +86,13 @@ CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
     ZRAM_CONFIG_5_10 = "CONFIG_ZSMALLOC=y\nCONFIG_ZRAM=y\nCONFIG_MODULE_SIG=n\nCONFIG_CRYPTO_LZO=y\nCONFIG_ZRAM_DEF_COMP_LZ4KD=y\n"
     ZRAM_CONFIG_COMMON = "CONFIG_CRYPTO_LZ4HC=y\nCONFIG_CRYPTO_LZ4K=y\nCONFIG_CRYPTO_LZ4KD=y\nCONFIG_CRYPTO_842=y\nCONFIG_CRYPTO_LZ4K_OPLUS=y\nCONFIG_ZRAM_WRITEBACK=y\n"
 
-    def __init__(self, config: BuildConfig, workspace: str):
+    def __init__(self, config: BuildConfig, workspace: str = None):
         self.config = config
-        self.workspace = Path(workspace)
-        self.shell = ShellCommand(cwd=workspace)
+        self.workspace = Path(workspace) if workspace else P.GKI_WORKSPACE
+        self.shell = ShellCommand(cwd=str(self.workspace))
         self.env = os.environ.copy()
         self.work_dir = self.workspace / config.config_name
         self.work_dir.mkdir(parents=True, exist_ok=True)
-        self.susfs_dir = self.workspace / "susfs4ksu"
-        self.sukisu_patch_dir = self.workspace / "SukiSU_patch"
-        self.anykernel_dir = self.workspace / "AnyKernel3"
-        self.kernel_patches_dir = self.workspace / "kernel_patches"
-        self.toolchain_dir = self.workspace / "toolchain"
-        self.mkbootimg_dir = self.workspace / "mkbootimg"
         self._setup_env()
 
     def _setup_env(self):
@@ -120,6 +100,7 @@ CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
         self.env["CCACHE_COMPILERCHECK"] = "%compiler% -dumpmachine; %compiler% -dumpversion"
         self.env["CCACHE_NOHASHDIR"] = "true"
         self.env["CCACHE_HARDLINK"] = "true"
+        self.env["CCACHE_DIR"] = str(P.CCACHE_DIR)
         self.shell.env = self.env
 
     def _run_cmd(self, cmd: str, **kwargs) -> subprocess.CompletedProcess:
@@ -130,9 +111,9 @@ CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
         self.shell.cwd = str(path)
 
     def _apply_susfs_commit(self):
-        if not self.config.susfs_commit or not self.susfs_dir.exists():
+        if not self.config.susfs_commit or not P.SUSFS_REPO_DIR.exists():
             return
-        self._chdir(self.susfs_dir)
+        self._chdir(P.SUSFS_REPO_DIR)
         if self.config.susfs_commit.startswith("HEAD~"):
             self._run_cmd("git fetch origin", check=False)
             self._run_cmd(f"git reset --hard {self.config.susfs_commit}", check=False)
@@ -144,10 +125,10 @@ CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
     def clone_repositories(self):
         logger.info("=== 开始克隆仓库 ===")
         for name, repo_dir, url, branch in [
-            ("SUSFS", self.susfs_dir, SUSFS_REPO_CONFIG['repo_url'], self.config.kernel_branch),
-            ("SukiSU Patch", self.sukisu_patch_dir, SUKISU_PATCH_REPO_CONFIG['repo_url'], None),
-            ("AnyKernel3", self.anykernel_dir, ANYKERNEL_CONFIG['repo_url'], ANYKERNEL_CONFIG['branch']),
-            ("Kernel Patches", self.kernel_patches_dir, KERNEL_PATCHES_CONFIG['repo_url'], None),
+            ("SUSFS", P.SUSFS_REPO_DIR, SUSFS_REPO_CONFIG['repo_url'], self.config.kernel_branch),
+            ("SukiSU Patch", P.SUKISU_PATCH_REPO_DIR, SUKISU_PATCH_REPO_CONFIG['repo_url'], None),
+            ("AnyKernel3", P.ANYKERNEL_REPO_DIR, ANYKERNEL_CONFIG['repo_url'], ANYKERNEL_CONFIG['branch']),
+            ("Kernel Patches", P.KERNEL_PATCHES_REPO_DIR, KERNEL_PATCHES_CONFIG['repo_url'], None),
         ]:
             if not repo_dir.exists():
                 cmd = f"git clone {url}"
@@ -162,15 +143,15 @@ CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
 
     def clone_toolchain(self):
         logger.info("=== 克隆工具链 ===")
-        if not self.toolchain_dir.exists():
+        if not P.TOOLCHAIN_DIR.exists():
             self._run_cmd(f"git clone {TOOLCHAIN_CONFIG['aosp_mirror']}/kernel/prebuilts/build-tools "
-                         f"-b {TOOLCHAIN_CONFIG['build_tools_branch']} --depth 1 {self.toolchain_dir}", check=False)
-        if not self.mkbootimg_dir.exists():
+                         f"-b {TOOLCHAIN_CONFIG['build_tools_branch']} --depth 1 {P.TOOLCHAIN_DIR}", check=False)
+        if not P.MKBOOTIMG_DIR.exists():
             self._run_cmd(f"git clone {TOOLCHAIN_CONFIG['aosp_mirror']}/platform/system/tools/mkbootimg "
-                         f"-b {TOOLCHAIN_CONFIG['mkbootimg_branch']} --depth 1 {self.mkbootimg_dir}", check=False)
-        self.env["AVBTOOL"] = str(self.toolchain_dir / "linux-x86/bin/avbtool")
-        self.env["MKBOOTIMG"] = str(self.mkbootimg_dir / "mkbootimg.py")
-        self.env["UNPACK_BOOTIMG"] = str(self.mkbootimg_dir / "unpack_bootimg.py")
+                         f"-b {TOOLCHAIN_CONFIG['mkbootimg_branch']} --depth 1 {P.MKBOOTIMG_DIR}", check=False)
+        self.env["AVBTOOL"] = str(P.TOOLCHAIN_DIR / "linux-x86/bin/avbtool")
+        self.env["MKBOOTIMG"] = str(P.MKBOOTIMG_DIR / "mkbootimg.py")
+        self.env["UNPACK_BOOTIMG"] = str(P.MKBOOTIMG_DIR / "unpack_bootimg.py")
         if "BOOT_SIGN_KEY_PATH" in os.environ:
             self.env["BOOT_SIGN_KEY_PATH"] = os.environ["BOOT_SIGN_KEY_PATH"]
         self.shell.env = self.env
@@ -178,9 +159,8 @@ CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
 
     def setup_repo_tool(self):
         logger.info("=== 安装 repo 工具 ===")
-        repo_dir = self.workspace / "git-repo"
-        repo_dir.mkdir(exist_ok=True)
-        repo_path = repo_dir / "repo"
+        P.REPO_TOOL_DIR.mkdir(exist_ok=True)
+        repo_path = P.REPO_TOOL_DIR / "repo"
         if not repo_path.exists():
             self._run_cmd(f"curl https://storage.googleapis.com/git-repo-downloads/repo > {repo_path}", check=False)
             self._run_cmd(f"chmod a+rx {repo_path}", check=False)
@@ -285,12 +265,12 @@ CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
         logger.info("=== 应用 SUSFS 补丁 ===")
         self._chdir(self.work_dir)
         common_dir = self.work_dir / "common"
-        susfs_patch = self.susfs_dir / "kernel_patches" / self.config.get_susfs_patch_filename()
+        susfs_patch = P.SUSFS_REPO_DIR / "kernel_patches" / self.config.get_susfs_patch_filename()
         if susfs_patch.exists():
             self._run_cmd(f"cp {susfs_patch} {common_dir}/", check=False)
         for src, dst in [
-            (self.susfs_dir / "kernel_patches/fs", common_dir / "fs/"),
-            (self.susfs_dir / "kernel_patches/include/linux", common_dir / "include/linux/"),
+            (P.SUSFS_REPO_DIR / "kernel_patches/fs", common_dir / "fs/"),
+            (P.SUSFS_REPO_DIR / "kernel_patches/include/linux", common_dir / "include/linux/"),
         ]:
             if src.exists():
                 self._run_cmd(f"cp -r {src}/* {dst}", check=False)
@@ -304,7 +284,7 @@ CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
     def apply_sukisu_patches(self):
         logger.info("=== 应用 SukiSU 补丁 ===")
         self._chdir(self.work_dir / "common")
-        hooks_patch = self.sukisu_patch_dir / "69_hide_stuff.patch"
+        hooks_patch = P.SUKISU_PATCH_REPO_DIR / "69_hide_stuff.patch"
         if hooks_patch.exists():
             self._run_cmd(f"cp {hooks_patch} . && patch -p1 -F 3 < 69_hide_stuff.patch", check=False)
 
@@ -313,15 +293,15 @@ CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
             return
         logger.info("=== 应用 ZRAM (LZ4KD) 补丁 ===")
         self._chdir(self.work_dir / "common")
-        for src in [
-            (self.sukisu_patch_dir / "other/zram/lz4k/include/linux", "include/linux/"),
-            (self.sukisu_patch_dir / "other/zram/lz4k/lib", "lib/"),
-            (self.sukisu_patch_dir / "other/zram/lz4k/crypto", "crypto/"),
-            (self.sukisu_patch_dir / "other/zram/lz4k_oplus", "lib/"),
+        for src, dst in [
+            (P.SUKISU_PATCH_REPO_DIR / "other/zram/lz4k/include/linux", "include/linux/"),
+            (P.SUKISU_PATCH_REPO_DIR / "other/zram/lz4k/lib", "lib/"),
+            (P.SUKISU_PATCH_REPO_DIR / "other/zram/lz4k/crypto", "crypto/"),
+            (P.SUKISU_PATCH_REPO_DIR / "other/zram/lz4k_oplus", "lib/"),
         ]:
             if src[0].exists():
                 self._run_cmd(f"cp -r {src[0]}/* {src[1]}", check=False)
-        zram_patch_dir = self.sukisu_patch_dir / f"other/zram/zram_patch/{self.config.kernel_version}"
+        zram_patch_dir = P.SUKISU_PATCH_REPO_DIR / f"other/zram/zram_patch/{self.config.kernel_version}"
         for patch in ["lz4kd.patch", "lz4k_oplus.patch"]:
             p = zram_patch_dir / patch
             if p.exists():
@@ -529,7 +509,7 @@ CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
                 result = self._run_cmd("LTO=thin BUILD_CONFIG=common/build.config.gki.aarch64 build/build.sh CC=\"/usr/bin/ccache clang\"", check=False)
             else:
                 logger.info("使用 Bazel 构建方式...")
-                result = self._run_cmd("tools/bazel build --disk_cache=/home/runner/.cache/bazel --config=fast --lto=thin //common:kernel_aarch64_dist", check=False)
+                result = self._run_cmd(f"tools/bazel build --disk_cache={P.BAZEL_CACHE_DIR} --config=fast --lto=thin //common:kernel_aarch64_dist", check=False)
 
             if result.returncode == 0:
                 logger.info("=== 内核编译成功 ===")
@@ -622,9 +602,9 @@ CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
         logger.info("=== 创建 AnyKernel3 ZIP 文件 ===")
         self._chdir(self.work_dir)
         artifacts = []
-        ak3_dir = self.anykernel_dir
+        ak3_dir = P.ANYKERNEL_REPO_DIR
 
-        for suffix, ext in [("", ""), ("-lz4", ".lz4"), ("-gz", ".gz")]:
+        for suffix in ["", "-lz4", "-gz"]:
             image_file = f"Image{suffix}"
             image_path = self.work_dir / image_file
             if not image_path.exists():
